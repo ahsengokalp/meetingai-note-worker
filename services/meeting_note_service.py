@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 
 from meetingai_note_worker.services.ollama_service import OllamaService
@@ -13,6 +14,10 @@ from meetingai_shared.repositories.meeting_store import MeetingStore, normalize_
 
 
 logger = logging.getLogger(__name__)
+
+MAP_REDUCE_TRANSCRIPT_CHAR_THRESHOLD = 14_000
+MAP_REDUCE_CHUNK_TARGET_CHARS = 9_000
+MAP_REDUCE_CHUNK_OVERLAP_CHARS = 1_200
 
 
 SYSTEM = (
@@ -129,6 +134,56 @@ Live transcript (secondary source, lower priority):
 \"\"\"{live_transcript}\"\"\"
 """
 
+CHUNK_EXTRACTION_PROMPT_TEMPLATE = """\
+Analyze only the transcript chunk below and extract structured meeting information.
+Return JSON only and follow the response schema exactly.
+
+Meeting context/title:
+{context_title}
+
+Meeting participants:
+{participant_context}
+
+Rules:
+- This is only one chunk, not the whole meeting.
+- Use only information that is explicitly stated or clearly supported by this chunk.
+- Do not invent missing context from other parts of the meeting.
+- If ownership or due date is unclear, use "unknown".
+- Keep the chunk summary concise but concrete. Aim for 4 to 8 factual sentences.
+- Extract detailed main_topics, decisions, action_items, risks, open_questions, and open_items whenever the chunk supports them.
+- Use participant_contributions only when a person's contribution is actually visible in this chunk.
+- Prefer empty arrays over weak guesses.
+
+Chunk label:
+{chunk_label}
+
+Transcript chunk:
+\"\"\"{chunk_text}\"\"\"
+"""
+
+FINAL_NOTE_FROM_CHUNKS_PROMPT_TEMPLATE = """\
+Create one final long-form meeting note from the structured chunk materials below.
+Return JSON only and follow the response schema exactly.
+
+Meeting context/title:
+{context_title}
+
+Meeting participants:
+{participant_context}
+
+Rules:
+- Use only the information contained in the structured chunk materials below.
+- Merge duplicate or overlapping items.
+- The final summary and context_and_objective must be long, detailed, and operationally useful.
+- Preserve concrete people, departments, blockers, technical details, production stages, quality issues, and timing references when they appear in the extracted material.
+- Do not invent facts that do not appear in the materials below.
+- If ownership or due date is unclear, use "unknown".
+- Keep decisions, action_items, risks, open_questions, and open_items concrete and explicit.
+
+Structured chunk materials:
+{structured_materials}
+"""
+
 
 def build_fallback_summary(transcript: str, limit: int = 1400) -> str:
     compact = " ".join(str(transcript or "").split()).strip()
@@ -182,7 +237,246 @@ def build_participant_context(participants: list[dict[str, Any]] | None = None) 
     return "\n".join(lines)
 
 
-def analyze_transcript_text(
+def normalize_key(value: Any) -> str:
+    return re.sub(r"\W+", " ", compact_text(value).casefold()).strip()
+
+
+def dedupe_text_items(values: list[Any]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = compact_text(value)
+        if not text:
+            continue
+        key = normalize_key(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+    return normalized
+
+
+def merge_participant_contributions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = compact_text(item.get("name")) or "unknown"
+        key = normalize_key(name)
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = {"name": name, "role": compact_text(item.get("role")), "contributions": []}
+            order.append(key)
+        elif not compact_text(merged[key].get("role")):
+            merged[key]["role"] = compact_text(item.get("role"))
+
+        existing_keys = {normalize_key(value) for value in merged[key]["contributions"]}
+        for contribution in item.get("contributions") or []:
+            text = compact_text(contribution)
+            contribution_key = normalize_key(text)
+            if not text or not contribution_key or contribution_key in existing_keys:
+                continue
+            merged[key]["contributions"].append(text)
+            existing_keys.add(contribution_key)
+
+    return [merged[key] for key in order]
+
+
+def prefer_non_unknown(current: str, candidate: str) -> str:
+    current_text = compact_text(current) or "unknown"
+    candidate_text = compact_text(candidate) or "unknown"
+    if current_text == "unknown" and candidate_text != "unknown":
+        return candidate_text
+    return current_text
+
+
+def merge_decision_details(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    merged: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        decision = compact_text(item.get("decision"))
+        if not decision:
+            continue
+        key = normalize_key(decision)
+        if key not in merged:
+            merged[key] = {
+                "decision": decision,
+                "status": compact_text(item.get("status")) or "unknown",
+                "priority": compact_text(item.get("priority")) or "unknown",
+            }
+            order.append(key)
+            continue
+        merged[key]["status"] = prefer_non_unknown(merged[key]["status"], str(item.get("status") or "unknown"))
+        merged[key]["priority"] = prefer_non_unknown(
+            merged[key]["priority"],
+            str(item.get("priority") or "unknown"),
+        )
+    return [merged[key] for key in order]
+
+
+def merge_action_items(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    merged: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        task = compact_text(item.get("task"))
+        if not task:
+            continue
+        owner = compact_text(item.get("owner")) or "unknown"
+        key = normalize_key(f"{task}::{owner}")
+        if key not in merged:
+            merged[key] = {
+                "task": task,
+                "owner": owner,
+                "due_date": compact_text(item.get("due_date")) or "unknown",
+                "status": compact_text(item.get("status")) or "unknown",
+                "priority": compact_text(item.get("priority")) or "unknown",
+            }
+            order.append(key)
+            continue
+        merged[key]["due_date"] = prefer_non_unknown(merged[key]["due_date"], str(item.get("due_date") or "unknown"))
+        merged[key]["status"] = prefer_non_unknown(merged[key]["status"], str(item.get("status") or "unknown"))
+        merged[key]["priority"] = prefer_non_unknown(
+            merged[key]["priority"],
+            str(item.get("priority") or "unknown"),
+        )
+    return [merged[key] for key in order]
+
+
+def merge_open_items(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    merged: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = compact_text(item.get("item"))
+        if not text:
+            continue
+        key = normalize_key(text)
+        if key not in merged:
+            merged[key] = {"item": text, "status": compact_text(item.get("status")) or "unknown"}
+            order.append(key)
+            continue
+        merged[key]["status"] = prefer_non_unknown(merged[key]["status"], str(item.get("status") or "unknown"))
+    return [merged[key] for key in order]
+
+
+def split_transcript_into_units(transcript: str) -> list[str]:
+    lines = [compact_text(line) for line in transcript.splitlines() if compact_text(line)]
+    if len(lines) >= 6:
+        return lines
+
+    sentences = [compact_text(part) for part in re.split(r"(?<=[.!?])\s+", transcript) if compact_text(part)]
+    if len(sentences) >= 4:
+        return sentences
+
+    words = transcript.split()
+    if not words:
+        return []
+    return [" ".join(words[index : index + 120]).strip() for index in range(0, len(words), 120)]
+
+
+def split_transcript_into_chunks(
+    transcript: str,
+    target_chars: int = MAP_REDUCE_CHUNK_TARGET_CHARS,
+    overlap_chars: int = MAP_REDUCE_CHUNK_OVERLAP_CHARS,
+) -> list[str]:
+    units = split_transcript_into_units(transcript)
+    if not units:
+        return []
+
+    chunks: list[str] = []
+    current_units: list[str] = []
+    current_chars = 0
+
+    for unit in units:
+        unit_chars = len(unit) + 1
+        if current_units and current_chars + unit_chars > target_chars:
+            chunks.append(" ".join(current_units).strip())
+            overlap_units: list[str] = []
+            overlap_used = 0
+            for existing in reversed(current_units):
+                overlap_units.insert(0, existing)
+                overlap_used += len(existing) + 1
+                if overlap_used >= overlap_chars:
+                    break
+            current_units = overlap_units[:]
+            current_chars = sum(len(item) + 1 for item in current_units)
+
+        current_units.append(unit)
+        current_chars += unit_chars
+
+    if current_units:
+        chunks.append(" ".join(current_units).strip())
+
+    return [chunk for chunk in chunks if chunk]
+
+
+def build_empty_note_payload(title: str | None = None, summary: str = "") -> dict[str, Any]:
+    return {
+        "title": compact_text(title),
+        "summary": compact_text(summary),
+        "context_and_objective": "",
+        "main_topics": [],
+        "participant_contributions": [],
+        "decisions": [],
+        "decision_details": [],
+        "action_items": [],
+        "risks": [],
+        "open_questions": [],
+        "open_items": [],
+        "tags": [],
+    }
+
+
+def merge_chunk_note_payloads(chunk_notes: list[dict[str, Any]], title: str | None = None) -> dict[str, Any]:
+    merged = normalize_note_payload(
+        {
+            "title": compact_text(title) or compact_text(next((item.get("title") for item in chunk_notes if compact_text(item.get("title"))), "")),
+            "summary": " ".join(dedupe_text_items([item.get("summary") for item in chunk_notes])),
+            "context_and_objective": " ".join(
+                dedupe_text_items([item.get("context_and_objective") for item in chunk_notes])
+            ),
+            "main_topics": dedupe_text_items(
+                [topic for item in chunk_notes for topic in (item.get("main_topics") or [])]
+            ),
+            "participant_contributions": merge_participant_contributions(
+                [participant for item in chunk_notes for participant in (item.get("participant_contributions") or [])]
+            ),
+            "decisions": dedupe_text_items(
+                [decision for item in chunk_notes for decision in (item.get("decisions") or [])]
+            ),
+            "decision_details": merge_decision_details(
+                [detail for item in chunk_notes for detail in (item.get("decision_details") or [])]
+            ),
+            "action_items": merge_action_items(
+                [action for item in chunk_notes for action in (item.get("action_items") or [])]
+            ),
+            "risks": dedupe_text_items([risk for item in chunk_notes for risk in (item.get("risks") or [])]),
+            "open_questions": dedupe_text_items(
+                [question for item in chunk_notes for question in (item.get("open_questions") or [])]
+            ),
+            "open_items": merge_open_items(
+                [open_item for item in chunk_notes for open_item in (item.get("open_items") or [])]
+            ),
+            "tags": dedupe_text_items([tag for item in chunk_notes for tag in (item.get("tags") or [])]),
+        }
+    )
+    if not compact_text(merged.get("title")):
+        merged["title"] = compact_text(title) or "Toplanti notu"
+    return merged
+
+
+def should_use_map_reduce(transcript: str) -> bool:
+    return len(compact_text(transcript)) >= MAP_REDUCE_TRANSCRIPT_CHAR_THRESHOLD
+
+
+def analyze_transcript_text_single_pass(
     transcript: str,
     supporting_transcript: str | None = None,
     title: str | None = None,
@@ -251,6 +545,160 @@ def analyze_transcript_text(
         )
         raise ValueError("LLM output did not contain enough structured meeting note data.")
     return normalized
+
+
+def analyze_transcript_text_via_map_reduce(
+    transcript: str,
+    supporting_transcript: str | None = None,
+    title: str | None = None,
+    participants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    cleaned = transcript.strip()
+    if not cleaned:
+        raise ValueError("Transcript looks empty.")
+    cleaned_supporting = str(supporting_transcript or "").strip()
+
+    ollama = OllamaService(OLLAMA_BASE_URL, OLLAMA_MODEL, timeout=OLLAMA_TIMEOUT)
+    context_title = str(title or "").strip() or "No extra context provided."
+    participant_context = build_participant_context(participants)
+    chunks = split_transcript_into_chunks(cleaned)
+    if len(chunks) <= 1:
+        logger.info(
+            "Map-reduce note pipeline fell back to single pass because chunking produced %s chunk.",
+            len(chunks),
+        )
+        return analyze_transcript_text_single_pass(
+            transcript=cleaned,
+            supporting_transcript=cleaned_supporting,
+            title=title,
+            participants=participants,
+        )
+
+    logger.info(
+        "Using map-reduce note pipeline: model=%s transcript_chars=%s chunk_count=%s target_chars=%s overlap_chars=%s supporting_chars=%s",
+        OLLAMA_MODEL,
+        len(cleaned),
+        len(chunks),
+        MAP_REDUCE_CHUNK_TARGET_CHARS,
+        MAP_REDUCE_CHUNK_OVERLAP_CHARS,
+        len(cleaned_supporting),
+    )
+
+    chunk_notes: list[dict[str, Any]] = []
+    for index, chunk_text in enumerate(chunks, start=1):
+        prompt = CHUNK_EXTRACTION_PROMPT_TEMPLATE.format(
+            context_title=context_title,
+            participant_context=participant_context,
+            chunk_label=f"{index}/{len(chunks)}",
+            chunk_text=chunk_text,
+        )
+        logger.info(
+            "Processing transcript chunk for meeting note extraction: chunk=%s/%s chunk_chars=%s prompt_chars=%s",
+            index,
+            len(chunks),
+            len(chunk_text),
+            len(prompt),
+        )
+        try:
+            raw_chunk_data = ollama.generate_json(
+                prompt=prompt,
+                system=SYSTEM,
+                response_format=NOTE_JSON_SCHEMA,
+            )
+            normalized_chunk = normalize_note_payload(raw_chunk_data)
+            if not has_meaningful_note_content(normalized_chunk):
+                normalized_chunk = build_empty_note_payload(
+                    summary=build_fallback_summary(chunk_text, limit=900),
+                )
+            chunk_notes.append(normalized_chunk)
+        except Exception:
+            logger.exception(
+                "Chunk extraction failed in map-reduce note pipeline: chunk=%s/%s chunk_chars=%s",
+                index,
+                len(chunks),
+                len(chunk_text),
+            )
+            chunk_notes.append(
+                build_empty_note_payload(
+                    summary=build_fallback_summary(chunk_text, limit=900),
+                )
+            )
+
+    merged_material = merge_chunk_note_payloads(chunk_notes, title=context_title)
+    structured_materials = {
+        "chunk_count": len(chunk_notes),
+        "chunk_summaries": dedupe_text_items([item.get("summary") for item in chunk_notes]),
+        "merged_note": merged_material,
+    }
+    if cleaned_supporting:
+        structured_materials["supporting_live_transcript_summary"] = build_fallback_summary(
+            cleaned_supporting,
+            limit=900,
+        )
+
+    final_prompt = FINAL_NOTE_FROM_CHUNKS_PROMPT_TEMPLATE.format(
+        context_title=context_title,
+        participant_context=participant_context,
+        structured_materials=json.dumps(structured_materials, ensure_ascii=False, indent=2),
+    )
+    logger.info(
+        "Running final reduction step for map-reduce note pipeline: chunk_count=%s prompt_chars=%s merged_summary_chars=%s merged_topics=%s merged_actions=%s",
+        len(chunk_notes),
+        len(final_prompt),
+        len(compact_text(merged_material.get("summary"))),
+        len(merged_material.get("main_topics") or []),
+        len(merged_material.get("action_items") or []),
+    )
+
+    try:
+        reduced = ollama.generate_json(
+            prompt=final_prompt,
+            system=SYSTEM,
+            response_format=NOTE_JSON_SCHEMA,
+        )
+        normalized = normalize_note_payload(reduced)
+    except Exception:
+        logger.exception("Final reduction step failed in map-reduce note pipeline.")
+        normalized = merged_material
+
+    if not has_meaningful_note_content(normalized):
+        logger.warning("Map-reduce note pipeline returned empty content; using merged chunk material as fallback.")
+        normalized = merged_material
+
+    if not compact_text(normalized.get("summary")):
+        normalized["summary"] = compact_text(merged_material.get("summary")) or build_fallback_summary(cleaned)
+    if not compact_text(normalized.get("context_and_objective")):
+        normalized["context_and_objective"] = compact_text(merged_material.get("context_and_objective"))
+    if not compact_text(normalized.get("title")):
+        normalized["title"] = context_title if context_title != "No extra context provided." else "Toplanti notu"
+
+    return normalized
+
+
+def analyze_transcript_text(
+    transcript: str,
+    supporting_transcript: str | None = None,
+    title: str | None = None,
+    participants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    cleaned = transcript.strip()
+    if not cleaned:
+        raise ValueError("Transcript looks empty.")
+
+    if should_use_map_reduce(cleaned):
+        return analyze_transcript_text_via_map_reduce(
+            transcript=cleaned,
+            supporting_transcript=supporting_transcript,
+            title=title,
+            participants=participants,
+        )
+
+    return analyze_transcript_text_single_pass(
+        transcript=cleaned,
+        supporting_transcript=supporting_transcript,
+        title=title,
+        participants=participants,
+    )
 
 
 def analyze_transcript_file(
