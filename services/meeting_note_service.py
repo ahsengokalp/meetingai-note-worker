@@ -112,11 +112,11 @@ Instructions:
 - Write a long-form meeting note, not a short abstract.
 - Default to a note that is approximately 3x to 4x richer than a standard short meeting summary when the transcript has enough content.
 - The summary must be self-sufficient, operationally useful, and materially detailed. Make it long, dense, and specific rather than brief.
-- Prefer at least 8 to 16 full sentences in the summary when the transcript is rich enough. Do not compress the meeting into a few generic lines.
+- Prefer at least 16 to 30 full sentences in the summary when the transcript is rich enough. Do not compress the meeting into a few generic lines.
 - Use context_and_objective to explain why the meeting happened, what problem space it covered, what background constraints mattered, and what business or operational context framed the discussion.
-- Make context_and_objective substantially detailed as well; prefer at least 4 to 8 full sentences when the transcript supports it.
+- Make context_and_objective substantially detailed as well; prefer at least 6 to 12 full sentences when the transcript supports it.
 - Populate main_topics with detailed topic summaries. Each item should explain the issue, what was discussed, what alternatives or blockers appeared, and why the topic mattered operationally.
-- Prefer more topic coverage instead of fewer broad bullets. When the transcript is rich, aim for 6 to 12 detailed main_topics items instead of 2 or 3 short ones.
+- Prefer more topic coverage instead of fewer broad bullets. When the transcript is rich, aim for 8 to 16 detailed main_topics items instead of 2 or 3 short ones.
 - Do not mention personal names in summary, context_and_objective, main_topics, decisions, action_items, risks, open_questions, or open_items.
 - Populate participant_contributions in an aggregated way, not person by person.
 - If participant_contributions is used, prefer a single generic entry with name "Katılımcılar" and an empty role.
@@ -156,7 +156,8 @@ Rules:
 - Do not use personal names in the output.
 - Do not attribute statements to named people; use generic wording such as "katılımcılar" or "bir katılımcı".
 - If ownership or due date is unclear, use "unknown".
-- Keep the chunk summary concise but concrete. Aim for 4 to 8 factual sentences.
+- Keep the chunk summary detailed enough to preserve operational context. Aim for 6 to 12 factual sentences.
+- Do not collapse multiple distinct issues, blockers, or decisions into one short sentence if the chunk contains more detail.
 - Extract detailed main_topics, decisions, action_items, risks, open_questions, and open_items whenever the chunk supports them.
 - If participant_contributions is used, prefer one aggregated entry named "Katılımcılar" instead of person-based entries.
 - Prefer empty arrays over weak guesses.
@@ -184,7 +185,13 @@ Rules:
 - Follow Turkish spelling, grammar, and punctuation carefully.
 - Do not use personal names in the final output.
 - Do not attribute statements or ideas to named people; use generic wording such as "katılımcılar", "bir katılımcı", or "toplantıda belirtildi".
+- This is not a short executive abstract. Produce a long-form operational meeting note.
 - The final summary and context_and_objective must be long, detailed, and operationally useful.
+- Prefer a summary that is approximately 3x to 4x richer than a short meeting summary when the structured materials support it.
+- Prefer at least 18 to 32 full sentences in the summary for rich meetings.
+- Prefer at least 8 to 14 full sentences in context_and_objective when the materials support it.
+- Prefer 10 to 18 main_topics items for rich meetings, and make each item materially detailed rather than one-line brief.
+- Err on retaining distinct discussion points, blockers, risks, and follow-up details instead of compressing them away.
 - Preserve concrete people, departments, blockers, technical details, production stages, quality issues, and timing references when they appear in the extracted material.
 - Do not invent facts that do not appear in the materials below.
 - If ownership or due date is unclear, use "unknown".
@@ -756,6 +763,7 @@ def analyze_transcript_text_via_map_reduce(
     structured_materials = {
         "chunk_count": len(chunk_notes),
         "chunk_summaries": dedupe_text_items([item.get("summary") for item in chunk_notes]),
+        "chunk_notes": chunk_notes,
         "merged_note": merged_material,
     }
     if cleaned_supporting:
