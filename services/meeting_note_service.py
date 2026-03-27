@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 SYSTEM = (
     "You are a meeting assistant for DIKKAN Group. "
     "Write in Turkish. Return JSON only. No markdown. "
-    "No explanations. Be factual, concise, and operationally useful."
+    "No explanations. Be factual, thorough, detail-rich, and operationally useful. "
+    "Prefer completeness over brevity when the transcript supports it."
 )
 
 PROMPT_TEMPLATE = """\
@@ -101,15 +102,25 @@ Instructions:
 - Do not assign task ownership based on role alone unless the transcript clearly supports it.
 - If ownership is unclear, use "unknown".
 - If due date is unclear, use "unknown".
-- Write a detailed meeting note, not a short abstract.
-- The summary must be operationally useful and self-sufficient. Prefer multiple substantive paragraphs over a single short paragraph.
-- Use context_and_objective to explain why the meeting happened, what problem space it covered, and what broader operational context mattered.
-- Populate main_topics with detailed topic summaries. Each item should explain the issue, what was discussed, and why it mattered.
-- Populate participant_contributions for people who made meaningful contributions. Summarize each person's concrete inputs rather than generic praise.
+- Write a long-form meeting note, not a short abstract.
+- Default to a note that is approximately 3x to 4x richer than a standard short meeting summary when the transcript has enough content.
+- The summary must be self-sufficient, operationally useful, and materially detailed. Make it long, dense, and specific rather than brief.
+- Prefer at least 8 to 16 full sentences in the summary when the transcript is rich enough. Do not compress the meeting into a few generic lines.
+- Use context_and_objective to explain why the meeting happened, what problem space it covered, what background constraints mattered, and what business or operational context framed the discussion.
+- Make context_and_objective substantially detailed as well; prefer at least 4 to 8 full sentences when the transcript supports it.
+- Populate main_topics with detailed topic summaries. Each item should explain the issue, what was discussed, what alternatives or blockers appeared, and why the topic mattered operationally.
+- Prefer more topic coverage instead of fewer broad bullets. When the transcript is rich, aim for 6 to 12 detailed main_topics items instead of 2 or 3 short ones.
+- Populate participant_contributions for people who made meaningful contributions. Summarize each person's concrete inputs, arguments, concerns, clarifications, and commitments rather than generic praise.
+- When participant_contributions are present, prefer multiple contribution entries per person if the transcript supports them.
 - Populate decision_details with status and priority whenever the transcript supports them. If unclear, use "unknown".
-- Populate open_items for unresolved issues, pending clarifications, and items that still need follow-up.
+- Populate decisions, decision_details, action_items, risks, open_questions, and open_items with full-sentence descriptions, not short fragments.
+- For action_items, explain what needs to be done and include surrounding context if it helps execution.
+- For risks and open_questions, explain why each item matters, what could happen, or what is still unknown.
+- Populate open_items for unresolved issues, pending clarifications, dependencies, and items that still need follow-up.
 - Prefer tags that best match the actual meeting content.
 - If the meeting is mainly about production, quality, testing, maintenance, planning, shipment, or operational delays, reflect that clearly in the summary, decisions, risks, and tags.
+- Avoid generic filler such as "meeting discussed various topics" or "important points were evaluated" unless you immediately specify what those topics or points were.
+- Every section should preserve concrete names, departments, blockers, production stages, quality concerns, delivery timing, and technical references when the transcript supports them.
 
 Final transcript (primary source, higher priority):
 \"\"\"{final_transcript}\"\"\"
@@ -119,7 +130,7 @@ Live transcript (secondary source, lower priority):
 """
 
 
-def build_fallback_summary(transcript: str, limit: int = 320) -> str:
+def build_fallback_summary(transcript: str, limit: int = 1400) -> str:
     compact = " ".join(str(transcript or "").split()).strip()
     if not compact:
         return ""
