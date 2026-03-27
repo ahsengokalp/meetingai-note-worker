@@ -97,8 +97,10 @@ Instructions:
 - If the final transcript and live transcript conflict, prefer the final transcript.
 - Use the live transcript only to recover details that may be missing or unclear in the final transcript.
 - Use company and factory context only to interpret domain-specific terms, company names, and abbreviations.
-- Use participant names and job titles only as supporting context.
-- If a person is referenced by first name, surname, or role, you may use the participant list to resolve identity.
+- Follow Turkish spelling, grammar, and punctuation carefully.
+- Do not use participant names in the output.
+- Do not resolve speaker identity to a named person, even if the participant list contains names.
+- If the transcript refers to a speaker or a viewpoint, use generic wording such as "katılımcılar", "bir katılımcı", "toplantıda belirtildi", or "toplantıda ifade edildi".
 - If company abbreviations, phonetic spellings, or short references appear, you may use the company-specific terminology section to interpret them.
 - If the transcript contains obvious transcription noise, repeated fragments, filler words, or incomplete meaningless phrases, ignore those parts.
 - If the transcript is ambiguous or fragmented, do not turn weak evidence into a decision or action item.
@@ -115,8 +117,10 @@ Instructions:
 - Make context_and_objective substantially detailed as well; prefer at least 4 to 8 full sentences when the transcript supports it.
 - Populate main_topics with detailed topic summaries. Each item should explain the issue, what was discussed, what alternatives or blockers appeared, and why the topic mattered operationally.
 - Prefer more topic coverage instead of fewer broad bullets. When the transcript is rich, aim for 6 to 12 detailed main_topics items instead of 2 or 3 short ones.
-- Populate participant_contributions for people who made meaningful contributions. Summarize each person's concrete inputs, arguments, concerns, clarifications, and commitments rather than generic praise.
-- When participant_contributions are present, prefer multiple contribution entries per person if the transcript supports them.
+- Do not mention personal names in summary, context_and_objective, main_topics, decisions, action_items, risks, open_questions, or open_items.
+- Populate participant_contributions in an aggregated way, not person by person.
+- If participant_contributions is used, prefer a single generic entry with name "Katılımcılar" and an empty role.
+- Summarize contributions as collective discussion points rather than attributing them to named people.
 - Populate decision_details with status and priority whenever the transcript supports them. If unclear, use "unknown".
 - Populate decisions, decision_details, action_items, risks, open_questions, and open_items with full-sentence descriptions, not short fragments.
 - For action_items, explain what needs to be done and include surrounding context if it helps execution.
@@ -148,10 +152,13 @@ Rules:
 - This is only one chunk, not the whole meeting.
 - Use only information that is explicitly stated or clearly supported by this chunk.
 - Do not invent missing context from other parts of the meeting.
+- Follow Turkish spelling, grammar, and punctuation carefully.
+- Do not use personal names in the output.
+- Do not attribute statements to named people; use generic wording such as "katılımcılar" or "bir katılımcı".
 - If ownership or due date is unclear, use "unknown".
 - Keep the chunk summary concise but concrete. Aim for 4 to 8 factual sentences.
 - Extract detailed main_topics, decisions, action_items, risks, open_questions, and open_items whenever the chunk supports them.
-- Use participant_contributions only when a person's contribution is actually visible in this chunk.
+- If participant_contributions is used, prefer one aggregated entry named "Katılımcılar" instead of person-based entries.
 - Prefer empty arrays over weak guesses.
 
 Chunk label:
@@ -174,11 +181,15 @@ Meeting participants:
 Rules:
 - Use only the information contained in the structured chunk materials below.
 - Merge duplicate or overlapping items.
+- Follow Turkish spelling, grammar, and punctuation carefully.
+- Do not use personal names in the final output.
+- Do not attribute statements or ideas to named people; use generic wording such as "katılımcılar", "bir katılımcı", or "toplantıda belirtildi".
 - The final summary and context_and_objective must be long, detailed, and operationally useful.
 - Preserve concrete people, departments, blockers, technical details, production stages, quality issues, and timing references when they appear in the extracted material.
 - Do not invent facts that do not appear in the materials below.
 - If ownership or due date is unclear, use "unknown".
 - Keep decisions, action_items, risks, open_questions, and open_items concrete and explicit.
+- If participant_contributions is used, keep it aggregated under a single "Katılımcılar" entry.
 
 Structured chunk materials:
 {structured_materials}
@@ -219,22 +230,50 @@ def has_meaningful_note_content(note: dict[str, Any]) -> bool:
 def build_participant_context(participants: list[dict[str, Any]] | None = None) -> str:
     normalized_participants = participants or []
     if not normalized_participants:
-        return "No participant context provided."
+        return "Participant list not provided. Do not use personal names in the output."
 
-    lines: list[str] = []
-    for index, participant in enumerate(normalized_participants, start=1):
+    titles: list[str] = []
+    for participant in normalized_participants:
+        job_title = compact_text(participant.get("job_title"))
+        if job_title and job_title not in titles:
+            titles.append(job_title)
+
+    lines = [
+        f"Participant count: {len(normalized_participants)}",
+        "Do not use participant names in the output. Refer to people only as katılımcılar or bir katılımcı.",
+    ]
+    if titles:
+        lines.append("Known participant roles/titles:")
+        lines.extend(f"- {title}" for title in titles)
+    return "\n".join(lines)
+
+
+def build_participant_aliases(participants: list[dict[str, Any]] | None = None) -> list[str]:
+    aliases: list[str] = []
+    for participant in participants or []:
         full_name = compact_text(participant.get("full_name"))
         if not full_name:
             full_name = compact_text(
                 f"{participant.get('first_name') or ''} {participant.get('last_name') or ''}"
             )
         email = compact_text(participant.get("email"))
-        job_title = compact_text(participant.get("job_title"))
-        label = full_name or email or f"Participant {index}"
-        details = [item for item in (job_title, email) if item]
-        lines.append(f"- {label}" + (f" | {' | '.join(details)}" if details else ""))
+        for candidate in (full_name, email):
+            if candidate and candidate not in aliases:
+                aliases.append(candidate)
+    return sorted(aliases, key=len, reverse=True)
 
-    return "\n".join(lines)
+
+def replace_aliases_with_generic_reference(text: Any, aliases: list[str]) -> str:
+    normalized = compact_text(text)
+    if not normalized:
+        return ""
+    updated = normalized
+    for alias in aliases:
+        escaped = re.escape(alias)
+        updated = re.sub(rf"(?<!\w){escaped}(?!\w)", "katılımcılar", updated, flags=re.IGNORECASE)
+    updated = re.sub(r"\b(katılımcılar(?:\s*,\s*katılımcılar)+)\b", "katılımcılar", updated, flags=re.IGNORECASE)
+    updated = re.sub(r"\s+", " ", updated).strip()
+    return updated
 
 
 def normalize_key(value: Any) -> str:
@@ -434,6 +473,92 @@ def build_empty_note_payload(title: str | None = None, summary: str = "") -> dic
     }
 
 
+def sanitize_note_output(
+    note: dict[str, Any],
+    participants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    aliases = build_participant_aliases(participants)
+    sanitized = normalize_note_payload(note)
+
+    sanitized["title"] = replace_aliases_with_generic_reference(sanitized.get("title"), aliases)
+    sanitized["summary"] = replace_aliases_with_generic_reference(sanitized.get("summary"), aliases)
+    sanitized["context_and_objective"] = replace_aliases_with_generic_reference(
+        sanitized.get("context_and_objective"),
+        aliases,
+    )
+    sanitized["main_topics"] = [
+        replace_aliases_with_generic_reference(item, aliases)
+        for item in sanitized.get("main_topics") or []
+        if replace_aliases_with_generic_reference(item, aliases)
+    ]
+    sanitized["decisions"] = [
+        replace_aliases_with_generic_reference(item, aliases)
+        for item in sanitized.get("decisions") or []
+        if replace_aliases_with_generic_reference(item, aliases)
+    ]
+    sanitized["risks"] = [
+        replace_aliases_with_generic_reference(item, aliases)
+        for item in sanitized.get("risks") or []
+        if replace_aliases_with_generic_reference(item, aliases)
+    ]
+    sanitized["open_questions"] = [
+        replace_aliases_with_generic_reference(item, aliases)
+        for item in sanitized.get("open_questions") or []
+        if replace_aliases_with_generic_reference(item, aliases)
+    ]
+
+    sanitized["decision_details"] = [
+        {
+            "decision": replace_aliases_with_generic_reference(item.get("decision"), aliases),
+            "status": compact_text(item.get("status")) or "unknown",
+            "priority": compact_text(item.get("priority")) or "unknown",
+        }
+        for item in sanitized.get("decision_details") or []
+        if replace_aliases_with_generic_reference(item.get("decision"), aliases)
+    ]
+    sanitized["action_items"] = [
+        {
+            "task": replace_aliases_with_generic_reference(item.get("task"), aliases),
+            "owner": "katılımcılar"
+            if replace_aliases_with_generic_reference(item.get("owner"), aliases) != compact_text(item.get("owner"))
+            else (compact_text(item.get("owner")) or "unknown"),
+            "due_date": compact_text(item.get("due_date")) or "unknown",
+            "status": compact_text(item.get("status")) or "unknown",
+            "priority": compact_text(item.get("priority")) or "unknown",
+        }
+        for item in sanitized.get("action_items") or []
+        if replace_aliases_with_generic_reference(item.get("task"), aliases)
+    ]
+    sanitized["open_items"] = [
+        {
+            "item": replace_aliases_with_generic_reference(item.get("item"), aliases),
+            "status": compact_text(item.get("status")) or "unknown",
+        }
+        for item in sanitized.get("open_items") or []
+        if replace_aliases_with_generic_reference(item.get("item"), aliases)
+    ]
+
+    all_contributions = dedupe_text_items(
+        [
+            replace_aliases_with_generic_reference(contribution, aliases)
+            for item in sanitized.get("participant_contributions") or []
+            for contribution in (item.get("contributions") or [])
+        ]
+    )
+    sanitized["participant_contributions"] = (
+        [
+            {
+                "name": "Katılımcılar",
+                "role": "",
+                "contributions": all_contributions,
+            }
+        ]
+        if all_contributions
+        else []
+    )
+    return normalize_note_payload(sanitized)
+
+
 def merge_chunk_note_payloads(chunk_notes: list[dict[str, Any]], title: str | None = None) -> dict[str, Any]:
     merged = normalize_note_payload(
         {
@@ -511,7 +636,7 @@ def analyze_transcript_text_single_pass(
         system=SYSTEM,
         response_format=NOTE_JSON_SCHEMA,
     )
-    normalized = normalize_note_payload(data)
+    normalized = sanitize_note_output(data, participants=participants)
     logger.info(
         "Normalized AI note payload: title_chars=%s summary_chars=%s context_chars=%s main_topics=%s participant_contributions=%s decisions=%s decision_details=%s action_items=%s risks=%s open_questions=%s open_items=%s tags=%s",
         len(compact_text(normalized.get("title"))),
@@ -605,7 +730,7 @@ def analyze_transcript_text_via_map_reduce(
                 system=SYSTEM,
                 response_format=NOTE_JSON_SCHEMA,
             )
-            normalized_chunk = normalize_note_payload(raw_chunk_data)
+            normalized_chunk = sanitize_note_output(raw_chunk_data, participants=participants)
             if not has_meaningful_note_content(normalized_chunk):
                 normalized_chunk = build_empty_note_payload(
                     summary=build_fallback_summary(chunk_text, limit=900),
@@ -624,7 +749,10 @@ def analyze_transcript_text_via_map_reduce(
                 )
             )
 
-    merged_material = merge_chunk_note_payloads(chunk_notes, title=context_title)
+    merged_material = sanitize_note_output(
+        merge_chunk_note_payloads(chunk_notes, title=context_title),
+        participants=participants,
+    )
     structured_materials = {
         "chunk_count": len(chunk_notes),
         "chunk_summaries": dedupe_text_items([item.get("summary") for item in chunk_notes]),
@@ -656,7 +784,7 @@ def analyze_transcript_text_via_map_reduce(
             system=SYSTEM,
             response_format=NOTE_JSON_SCHEMA,
         )
-        normalized = normalize_note_payload(reduced)
+        normalized = sanitize_note_output(reduced, participants=participants)
     except Exception:
         logger.exception("Final reduction step failed in map-reduce note pipeline.")
         normalized = merged_material
