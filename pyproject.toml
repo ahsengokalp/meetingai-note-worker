@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meetingai-note-worker"
+version = "0.1.0"
+description = "AI note generation and mail worker for MeetingAI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "Flask>=3.1,<4",
+  "meetingai-shared>=0.1.0",
+  "requests>=2.32,<3",
+]
+
+[project.scripts]
+meetingai-note-worker = "meetingai_note_worker.main:main"
+
+[tool.setuptools]
+packages = [
+  "meetingai_note_worker",
+  "meetingai_note_worker.services",
+]
+
+[tool.setuptools.package-dir]
+"meetingai_note_worker" = "."
+"meetingai_note_worker.services" = "services"
