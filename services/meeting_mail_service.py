@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from email.message import EmailMessage
+from email.utils import make_msgid
 from html import escape
 import logging
 import smtplib
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from meetingai_shared.config import (
@@ -20,10 +22,21 @@ from meetingai_shared.repositories.meeting_store import MeetingStore
 
 
 logger = logging.getLogger(__name__)
+MAIL_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "dikkan-logo.png"
 
 
 def compact_text(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def load_brand_logo() -> tuple[bytes, str] | None:
+    try:
+        if MAIL_LOGO_PATH.is_file():
+            suffix = MAIL_LOGO_PATH.suffix.lower().lstrip(".") or "png"
+            return MAIL_LOGO_PATH.read_bytes(), suffix
+    except OSError:
+        return None
+    return None
 
 
 def parse_extra_recipients() -> list[dict[str, str]]:
@@ -284,7 +297,7 @@ def render_html_participant_contributions(items: list[dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
-def build_mail_html(meeting: dict[str, Any], note: dict[str, Any]) -> str:
+def build_mail_html(meeting: dict[str, Any], note: dict[str, Any], *, logo_cid: str | None = None) -> str:
     title = compact_text(note.get("title")) or compact_text(meeting.get("title")) or compact_text(meeting.get("name"))
     summary = compact_text(note.get("summary"))
     context_and_objective = compact_text(note.get("context_and_objective"))
@@ -298,11 +311,18 @@ def build_mail_html(meeting: dict[str, Any], note: dict[str, Any]) -> str:
     participant_contributions = [item for item in (note.get("participant_contributions") or []) if isinstance(item, dict)]
     action_items = [item for item in (note.get("action_items") or []) if isinstance(item, dict)]
     created_at = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
+    meeting_name = escape(title or "Toplanti")
+    logo_html = (
+        f"<img src=\"cid:{escape(logo_cid)}\" alt=\"Dikkan\" "
+        "style=\"display:block;width:176px;max-width:100%;height:auto;border:0;\">"
+        if logo_cid
+        else "<div style=\"font-size:34px;font-weight:800;letter-spacing:-0.04em;color:#f3761d;\">Dikkan</div>"
+    )
 
     tag_html = (
         "".join(
             f"<span style=\"display:inline-block;margin:0 8px 8px 0;padding:6px 10px;border-radius:999px;"
-            f"background:#fff2e7;color:#9a4b22;font-size:12px;font-weight:600;\">{escape(tag)}</span>"
+            f"background:#fff1e6;color:#9a4b22;font-size:12px;font-weight:700;\">{escape(tag)}</span>"
             for tag in tags
         )
         if tags
@@ -312,52 +332,65 @@ def build_mail_html(meeting: dict[str, Any], note: dict[str, Any]) -> str:
     return f"""\
 <!DOCTYPE html>
 <html lang="tr">
-  <body style="margin:0;padding:24px;background-color:#f6efe8;font-family:Segoe UI,Arial,sans-serif;color:#2d241f;">
-    <div style="max-width:760px;margin:0 auto;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #ecd9cb;">
-      <div style="padding:28px 32px;background-color:#f4e4d7;border-bottom:1px solid #e3c7af;color:#2d241f;">
-        <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:#9a4b22;font-weight:700;">Meeting Intelligence</div>
-        <h1 style="margin:10px 0 6px;font-size:24px;line-height:1.2;color:#2d241f;font-weight:700;">{escape(title or 'Toplanti')}</h1>
-        <p style="margin:0;font-size:14px;color:#6f4c39;">AI Notu - {escape(created_at)}</p>
-      </div>
-      <div style="padding:24px 32px;">
-        <div style="margin-bottom:20px;padding:18px 20px;background:#fff8f2;border:1px solid #f0dfd3;border-radius:16px;">
-          <div style="font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#9a4b22;margin-bottom:8px;">Ozet</div>
-          <div style="font-size:15px;line-height:1.7;color:#2d241f;">{escape(summary or '-')}</div>
+  <body style="margin:0;padding:0;background-color:#fbf7f3;font-family:'Segoe UI',Arial,sans-serif;color:#2d241f;">
+    <div style="padding:32px 16px;background:linear-gradient(180deg,#fffaf6 0%,#f5efe9 100%);">
+      <div style="max-width:760px;margin:0 auto;background:#ffffff;border-radius:28px;overflow:hidden;border:1px solid #f0dfd3;box-shadow:0 18px 44px rgba(120,90,70,0.08);">
+        <div style="height:8px;background:linear-gradient(90deg,#f3761d 0%,#f4a261 100%);"></div>
+        <div style="padding:30px 32px 20px;background:linear-gradient(180deg,#fffaf6 0%,#fff4ec 100%);border-bottom:1px solid #f0dfd3;">
+          <table role="presentation" style="width:100%;border-collapse:collapse;">
+            <tr>
+              <td style="vertical-align:top;padding:0 16px 14px 0;">
+                {logo_html}
+              </td>
+              <td style="vertical-align:top;text-align:right;padding:0;">
+                <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:#fff1e6;color:#a85622;font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;">Meeting Intelligence</div>
+                <div style="margin-top:12px;font-size:13px;line-height:1.5;color:#7a6454;">AI Notu<br>{escape(created_at)}</div>
+              </td>
+            </tr>
+          </table>
+          <h1 style="margin:0 0 10px;font-size:28px;line-height:1.18;color:#2d241f;font-weight:800;letter-spacing:-0.04em;">{meeting_name}</h1>
+          <p style="margin:0;font-size:15px;line-height:1.7;color:#6f4c39;">Toplanti ciktilari, aksiyonlar ve kritik kararlar bu raporda modernize edilmis bir ozet olarak yer alir.</p>
         </div>
-        <div style="margin-bottom:20px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Ana Amac & Baglam</div>
-          <div style="font-size:15px;line-height:1.7;color:#2d241f;">{escape(context_and_objective or '-')}</div>
-        </div>
-        <div style="margin-bottom:20px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Gorusulen Ana Konular</div>
-          {render_html_list(main_topics)}
-        </div>
-        <div style="margin-bottom:20px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Katilimci Katkilari</div>
-          {render_html_participant_contributions(participant_contributions)}
-        </div>
-        <div style="margin-bottom:20px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Kararlar</div>
-          {render_html_decision_details(decision_details) if decision_details else render_html_list(decisions)}
-        </div>
-        <div style="margin-bottom:20px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Aksiyonlar</div>
-          {render_html_action_items(action_items)}
-        </div>
-        <div style="margin-bottom:20px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Riskler</div>
-          {render_html_list(risks)}
-        </div>
-        <div style="margin-bottom:20px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Acik Konular</div>
-          {render_html_open_items(open_items) if open_items else render_html_list(open_questions)}
-        </div>
-        <div style="margin-bottom:8px;">
-          <div style="font-size:16px;font-weight:700;color:#2d241f;margin-bottom:10px;">Etiketler</div>
-          {tag_html}
-        </div>
-        <div style="margin-top:20px;padding-top:16px;border-top:1px solid #e6d5c7;font-size:12px;line-height:1.6;color:#6f4c39;">
-          Bu rapor AI destegiyle otomatik olusturulmustur.
+        <div style="padding:26px 32px;">
+          <div style="margin-bottom:20px;padding:20px 22px;background:#fff8f2;border:1px solid #f0dfd3;border-radius:18px;">
+            <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Yonetici Ozeti</div>
+            <div style="font-size:15px;line-height:1.8;color:#2d241f;">{escape(summary or '-')}</div>
+          </div>
+          <div style="margin-bottom:18px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Ana Amac ve Baglam</div>
+            <div style="font-size:15px;line-height:1.75;color:#2d241f;">{escape(context_and_objective or '-')}</div>
+          </div>
+          <div style="margin-bottom:18px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Gorusulen Ana Konular</div>
+            {render_html_list(main_topics)}
+          </div>
+          <div style="margin-bottom:18px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Katilimci Katkilari</div>
+            {render_html_participant_contributions(participant_contributions)}
+          </div>
+          <div style="margin-bottom:18px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Kararlar</div>
+            {render_html_decision_details(decision_details) if decision_details else render_html_list(decisions)}
+          </div>
+          <div style="margin-bottom:18px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Aksiyonlar</div>
+            {render_html_action_items(action_items)}
+          </div>
+          <div style="margin-bottom:18px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Riskler</div>
+            {render_html_list(risks)}
+          </div>
+          <div style="margin-bottom:18px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Acik Konular</div>
+            {render_html_open_items(open_items) if open_items else render_html_list(open_questions)}
+          </div>
+          <div style="margin-bottom:8px;padding:18px 20px;background:#ffffff;border:1px solid #f2e5da;border-radius:18px;">
+            <div style="font-size:13px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#9a4b22;margin-bottom:10px;">Etiketler</div>
+            {tag_html}
+          </div>
+          <div style="margin-top:18px;padding-top:18px;border-top:1px solid #ead9cc;font-size:12px;line-height:1.7;color:#6f4c39;">
+            Bu rapor Dikkan Meeting Intelligence tarafindan AI destegiyle otomatik olusturulmustur.
+          </div>
         </div>
       </div>
     </div>
@@ -493,12 +526,29 @@ def send_meeting_note_email(
             error_message=error_message,
         )
 
+    logo_meta = load_brand_logo()
+    logo_cid = make_msgid(domain="dikkan.local")[1:-1] if logo_meta else None
+
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = MAIL_FROM or "meeting-intelligence@localhost"
     message["To"] = ", ".join(recipient["email"] for recipient in recipients)
     message.set_content(build_mail_body(meeting, note))
-    message.add_alternative(build_mail_html(meeting, note), subtype="html")
+    message.add_alternative(build_mail_html(meeting, note, logo_cid=logo_cid), subtype="html")
+    if logo_meta:
+        logo_bytes, logo_subtype = logo_meta
+        try:
+            html_part = message.get_payload()[-1]
+            html_part.add_related(
+                logo_bytes,
+                maintype="image",
+                subtype=logo_subtype,
+                cid=f"<{logo_cid}>",
+                disposition="inline",
+                filename=f"dikkan-logo.{logo_subtype}",
+            )
+        except Exception as exc:
+            logger.warning("Mail logo could not be embedded inline: %s", exc)
 
     try:
         with smtplib.SMTP(host=SMTP_HOST, port=SMTP_PORT, timeout=max(int(SMTP_TIMEOUT), 1)) as smtp:

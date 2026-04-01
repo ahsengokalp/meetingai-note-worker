@@ -23,6 +23,9 @@ packages = [
   "meetingai_note_worker.services",
 ]
 
+[tool.setuptools.package-data]
+"meetingai_note_worker.services" = ["assets/*.png"]
+
 [tool.setuptools.package-dir]
 "meetingai_note_worker" = "."
 "meetingai_note_worker.services" = "services"
